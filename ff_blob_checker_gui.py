@@ -4,7 +4,6 @@ import csv
 import shutil
 import time
 import tkinter as tk
-from crop import crop_image
 from tkinter import filedialog, messagebox, ttk
 from statistics import median, mean
 from collections import defaultdict
@@ -59,7 +58,6 @@ class App(tk.Tk):
 
         self.minArea = 0
         self.maxArea = 0
-        self.models = []
 
         # UI Layout
         self._build_ui()
@@ -200,26 +198,6 @@ class App(tk.Tk):
                 self.maxArea = area
             return areas
         
-    def extract_blob(self,num_results,r,model_path):
-        ## This saves a cropped image of each blob to folder based on the detected blob.
-        for i in range(num_results):
-            model = int(r.get("ModelNumber0"+str(i+1),""))
-
-            if not (model in self.models):
-                # we need to make the model directory
-                os.mkdir(self.failed_dir_var.get().strip() + "\\model" + str(model))
-                self.models.append(model)
-            
-            posY =  490 ##int(r.get("BlobPositionY0"+str(i+1),""))
-            posX = int(int(r.get("BlobPositionX0"+str(i+1),""))/100)            
-            length = 150   ##hard coding these for times sake, but can be parsed
-            height = 200
-            image_path = r.get("ImageDirectory","") + "\\" + r.get("ImageName","")
-            blob_path = self.failed_dir_var.get().strip() + "/model" + str(model) + "/" + str(i) + "_" + r.get("ImageName","")
-                       
-            cropBox = (posX-length/2,posY-height/2,posX+length/2,posY+length/2)
-            crop_image(image_path,blob_path,cropBox)
-
     def _run(self, execute=False):
         self.text.delete("1.0", tk.END)
 
@@ -247,13 +225,11 @@ class App(tk.Tk):
         blobAreas = []
         for r in rows:           
             try:
-                expected_max = int(r.get("BlobNumSearchMax",""))
                 val = to_float(r.get("BlobNumResults", ""))
                 if val != val:  # NaN
                     continue
                 if val < expected_max:
                     under_max.append((r.get("ImageName", ""), val))
-                self.extract_blob(int(val),r,csv_path) #for now use the csv path need to make it its own thing. 
                 blobAreas = self.parse_blob_area(int(val),r,blobAreas)
             except:
                 ## without this try/except the last and first line of the csv will throw a fault

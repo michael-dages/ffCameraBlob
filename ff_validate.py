@@ -3,8 +3,12 @@
 
 Mimics the Cognex In-Sight "Job Validation" workflow. Capture a known-good
 export as a baseline (their "Accept All" step), then diff later exports against
-it per image and per blob, reporting expected (E) vs actual (A) for every field
-that drifted.
+it per image, reporting expected (E) vs actual (A).
+
+The verdict is BlobNumResults: each blob is a feature that either registers or
+does not, so a part dropping from 8 detections to 7 is a regression while a
+blob whose area moved 3% is not. Per-blob metrics are diagnostic -- see
+--verbose to drill into a failure, or --metrics to let drift fail a run.
 
     python ff_validate.py baseline good_run.csv -o baseline.json
     python ff_validate.py run    new_run.csv  -b baseline.json
@@ -16,6 +20,7 @@ Pure stdlib, same as the GUI.
 import argparse
 import csv
 import hashlib
+import itertools
 import json
 import math
 import os
@@ -181,12 +186,21 @@ def within(expected, actual, tol):
                         abs_tol=float(tol.get("abs", 0.0) or 0.0))
 
 
-def compare(expected, actual, tolerances, fields):
-    """Return a list of (path, E, A) failures for one image."""
+def compare(expected, actual, tolerances, fields, metrics=False):
+    """Return a list of (path, E, A) failures for one image.
+
+    The verdict is the blob count. Each blob is a feature that either
+    registers or does not, so a part that went from 8 detections to 7 is a
+    regression while a blob whose area moved 3% is not. Per-blob metrics are
+    diagnostic -- see describe_mismatch() -- and only affect the verdict when
+    metrics=True.
+    """
     exp_n, act_n = expected[COUNT_FIELD], actual[COUNT_FIELD]
     if not within(exp_n, act_n, tolerances.get(COUNT_FIELD, {})):
         # Blob slots are not meaningfully comparable once the count moves.
         return [(COUNT_FIELD, exp_n, act_n)]
+    if not metrics:
+        return []
     fails = []
     for i, (be, ba) in enumerate(zip(expected["blobs"], actual["blobs"]), start=1):
         for field in BLOB_FIELDS:
@@ -196,6 +210,35 @@ def compare(expected, actual, tolerances, fields):
             if not within(e, a, tolerances.get(field, {})):
                 fails.append(("blob[%d].%s" % (i, field), e, a))
     return fails
+
+
+# Fields shown when drilling into a failure -- enough to identify which
+# physical feature stopped registering, without dumping all twelve metrics.
+DETAIL_FIELDS = [("x", "BlobPositionX"), ("y", "BlobPositionY"),
+                 ("area", "BlobArea"), ("r", "InnerCircleRadius")]
+
+
+def describe_mismatch(expected, actual):
+    """Pair up the expected and actual blob slots for a failing image.
+
+    When the count differs the blobs cannot be diffed 1:1, so both sides are
+    emitted positionally (blobs are already sorted left-to-right by
+    read_records) and the short side pads with None. That makes it visible
+    *which* feature went missing rather than merely that one did.
+    """
+    rows = []
+    exp_blobs = expected.get("blobs") or []
+    act_blobs = actual.get("blobs") or []
+    for i, (be, ba) in enumerate(itertools.zip_longest(exp_blobs, act_blobs), start=1):
+        rows.append(("slot %d" % i, _describe_blob(be), _describe_blob(ba)))
+    return rows
+
+
+def _describe_blob(blob):
+    if blob is None:
+        return None
+    return " ".join("%s=%s" % (label, fmt(blob.get(field)))
+                    for label, field in DETAIL_FIELDS)
 
 
 def merge_tolerances(baseline_tolerances, overrides):
@@ -301,8 +344,11 @@ def cmd_run(args):
         if act is None:
             missing.append(exp.get("image", key))
             continue
-        fails = compare(exp, act, tolerances, fields)
-        (failed if fails else passed).append((act["image"], fails))
+        fails = compare(exp, act, tolerances, fields, metrics=args.metrics)
+        if fails:
+            failed.append((act["image"], fails, exp, act))
+        else:
+            passed.append((act["image"], fails))
     unexpected = [r["image"] for k, r in actual.items() if k not in expected]
 
     report = {
@@ -317,7 +363,7 @@ def cmd_run(args):
         "unkeyed": unkeyed,
         "failures": [{"image": img, "tests": [
             {"field": p, "expected": e, "actual": a} for p, e, a in fails]}
-            for img, fails in failed],
+            for img, fails, _exp, _act in failed],
     }
 
     if args.json:
@@ -330,10 +376,15 @@ def cmd_run(args):
         print("Join key: %s   Blob order: %s" % (join_key, order))
         print("")
         shown = failed if args.max_failures <= 0 else failed[:args.max_failures]
-        for image, fails in shown:
+        for image, fails, exp, act in shown:
             print("FAIL  %s" % image)
             for path, e, a in fails:
                 print("        %-28s E:%-14s A:%s" % (path, fmt(e), fmt(a)))
+            if args.verbose:
+                for label, e, a in describe_mismatch(exp, act):
+                    print("        %-8s E: %-38s A: %s"
+                          % (label, e if e is not None else "-",
+                             a if a is not None else "-"))
         if len(shown) < len(failed):
             print("      ... and %d more failing images (--max-failures 0 for all)"
                   % (len(failed) - len(shown)))
@@ -393,9 +444,19 @@ def build_parser():
     r.add_argument("--order", choices=("position", "slot"),
                    help="override the baseline's blob order")
     r.add_argument("--images", help="folder holding the BMPs (default: one level above the CSV)")
-    r.add_argument("--fields", help="comma-separated blob fields to test (default: all)")
+    r.add_argument("--metrics", action="store_true",
+                   help="also fail on per-blob metric drift (area, radius, position). "
+                        "By default only BlobNumResults decides the verdict: a blob "
+                        "either registers or it does not, so metric drift is "
+                        "diagnostic, not a regression.")
+    r.add_argument("--verbose", action="store_true",
+                   help="under each failure, list the expected and actual blob slots "
+                        "side by side so you can see which feature went missing")
+    r.add_argument("--fields", help="comma-separated blob fields to test "
+                                    "(only applies with --metrics; default: all)")
     r.add_argument("--tolerance", action="append", metavar="FIELD=rel:N|abs:N",
-                   help="override one field's tolerance; repeatable")
+                   help="override one field's tolerance; repeatable "
+                        "(only applies with --metrics)")
     r.add_argument("--max-failures", type=int, default=25,
                    help="cap the failing images printed; 0 for all (default: 25)")
     r.add_argument("--allow-missing", action="store_true",

@@ -30,13 +30,31 @@ Analysis of CSV file
 
 ---
 
-## Utilities
-
-### `ff_validate.py` — job regression validation
+## Job Validation
 
 Catches unintended changes to the vision job. Capture a run you have confirmed
-is good as a **baseline**, then diff later exports against it per image and per
-blob. Modeled on the Cognex In-Sight "Job Validation" workflow.
+is good as a **baseline**, then diff later exports against it. Modeled on the
+Cognex In-Sight "Job Validation" workflow. Available both as the **Job
+Validation** tab in the GUI and as `ff_validate.py` on the command line — they
+share the same reader and produce identical verdicts and interchangeable
+baseline files.
+
+**The verdict is `BlobNumResults`.** Each blob is a feature that either
+registers or it doesn't, so a part dropping from 8 detections to 7 is a
+regression. A blob whose area moved 3% is not — that's normal variation, and it
+does not fail a run.
+
+![job_validation](images/job_validation.png)
+
+### GUI
+
+Open the **Job Validation** tab, pick the CSV export and a baseline, then
+**Run Validation**. Every image is listed with PASS/FAIL, its expected and
+actual count, and a delta; failing rows expand to show the expected blob slots
+against the actual ones, so you can see *which* feature stopped registering.
+**Capture Baseline…** writes a new baseline next to the CSV.
+
+### CLI
 
 ```bash
 # capture the expected results
@@ -47,14 +65,11 @@ python ff_validate.py run new_run.csv -b baseline.json
 ```
 
 ```
-FAIL  Camera3_1751661657.bmp
-        BlobNumResults               E:8              A:7
 FAIL  Camera3_1751809357.bmp
-        blob[5].BlobArea             E:997800         A:1097580
+        BlobNumResults               E:8              A:7
 
-  passed      489
-  failed      2
-  missing     1   in baseline, absent from this export
+  passed      13
+  failed      1
 
 INVALIDATED
 ```
@@ -62,7 +77,15 @@ INVALIDATED
 Exits `0` when everything matches, `1` on any failure, so it drops straight into
 CI or a pre-release check.
 
-**Matching images across runs** (`--key`):
+Add `--verbose` to list the blob slots under each failure — the missing feature
+shows as an expected side with no actual:
+
+```
+        slot 7   E: x=103869 y=51209 area=911300 r=2050    A: x=103869 y=51209 area=911300 r=2050
+        slot 8   E: x=117541 y=50625 area=887700 r=2050    A: -
+```
+
+**Matching images across runs** (`--key`, or the dropdown in the GUI):
 
 | mode | matches on | use when |
 |---|---|---|
@@ -70,24 +93,24 @@ CI or a pre-release check.
 | `hash` | SHA-256 of the `.bmp` | images keep their pixels but get renamed (e.g. `Camera3_<epoch>.bmp` re-captured) |
 | `index` | row ordinal | same corpus, same order, no stable names |
 
-**Tolerances.** Blob metrics are floats, so exact equality only works when the
-job replays identical stored images. Defaults allow 2% on areas and lengths,
-5% on `InnerCircleRadius`, and 5 px on positions; `BlobNumResults` and
-`ModelNumber` are exact. Edit the `tolerances` block of the baseline JSON for a
-permanent per-set limit, or override per run:
+**Per-blob metrics.** `--metrics` makes area/radius/position drift fail a run
+too, checked against tolerances (2% on areas and lengths, 5% on
+`InnerCircleRadius`, 5 px on positions). Off by default. With it, `--fields`
+restricts which metrics are tested and `--tolerance FIELD=rel:N|abs:N` overrides
+a limit; the `tolerances` block of the baseline JSON sets them permanently. The
+GUI is always count-only.
 
-```bash
-python ff_validate.py run new_run.csv -b baseline.json --tolerance BlobArea=rel:0.005
-```
-
-Other options: `--fields` to test only some blob metrics, `--order slot` to
-compare raw slot order instead of sorting blobs left-to-right, `--json` /
-`--report` for machine-readable output, `--max-failures 0` to print every
-failure.
+Other options: `--order slot` to compare raw slot order instead of sorting blobs
+left-to-right, `--json` / `--report` for machine-readable output,
+`--max-failures 0` to print every failure.
 
 > **Note.** `baseline` records what the job *did*, not what it *should* do —
 > exactly like Cognex's "Accept All". Baseline a run you have actually verified,
 > or you will faithfully confirm a bug forever.
+
+---
+
+## Utilities
 
 ### `collect_failed.sh`
 A helper script to consolidate results after multiple runs.

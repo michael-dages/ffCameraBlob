@@ -19,6 +19,7 @@ python ff_blob_checker_gui.py     # run the GUI
 
 python ff_validate.py baseline <csv> -o baseline.json   # capture expected results
 python ff_validate.py run <csv> -b baseline.json        # diff a later export against them
+python ff_validate.py run <csv> -b baseline.json --verbose   # ...and show which blob went missing
 
 ./collect_failed.sh               # bash only; consolidates failed_2025*/ BMPs into aggregate_failed/ and deletes them
 ```
@@ -37,27 +38,34 @@ imports it.
 ## Sample data
 
 A real export lives outside the repo at
-`C:\Users\archa\Desktop\uc406_pictures\InspectionCamImages\cam3\FastForward_N944_3L\FastForward_N944_3L.csv`
-(493 data rows), with its 492 `Camera3_<epoch>.bmp` images in the parent `cam3\` folder — i.e. the
-exact "CSV one level below the images" layout the GUI defaults assume. Images are 1280×1024
-8-bit grayscale (`mode="L"`). Use it to check parsing changes against reality.
+`C:\Users\archa\Desktop\uc406_pictures\InspectionCamImages\cam3\FastForward_N944_3L\FastForward_N944_3L.csv`,
+with its `Camera3_<epoch>.bmp` images in the parent `cam3\` folder — i.e. the exact "CSV one level
+below the images" layout the GUI defaults assume. Images are 1280×1024 8-bit grayscale
+(`mode="L"`). Use it to check parsing changes against reality.
 
-Blob counts over its 492 named rows, useful as a regression fixture — set the Expected field to
-*N* and the under-max count should come out as the running total below *N*:
+**This is a curated golden corpus, not a raw production dump.** As of 2026-09-15 it holds 15 data
+rows: 14 named images plus the trailer, and **every image has `BlobNumResults` = 8**. That makes
+it the validation fixture — any image that comes back with a count other than 8 is a regression.
+`BlobNumSearchMax` is `8` throughout (still a config input, not an expected yield).
 
-| BlobNumResults | 0 | 1 | 2 | 3 | 4 | 6 | 8 |
-|---|---|---|---|---|---|---|---|
-| images | 48 | 134 | 115 | 178 | 4 | 1 | 12 |
+Two image names carry **negative epochs** (`Camera3_-1546426502.bmp`, `Camera3_-1546454221.bmp`),
+which parse and validate fine but mean the camera clock was unset or overflowed at capture. Don't
+assume sorting these filenames yields chronological order.
 
-So Expected=1 → 48 flagged, Expected=3 → 297, Expected=8 → 480.
+Because every count is 8, a tab-1 run at Expected=8 flags nothing and files all 14 images into
+`passed_<ts>/1-top/`; that is also the only Expected value at which the "passed" categorization
+works (see the rough edges below). Expected=9 flags all 14.
 
-Blobs sit in one horizontal band (`BlobPositionY` ≈ 480–540 px) and come in **two shape classes**
-that are easy to mistake for a capture-condition difference but are not: `InnerCircleRadius` is
-either ≈5500 (55 px, 288 images) or ≈1950–2200 (~20 px, 156 images), while `BlobArea` stays
-~900k–1M for both. 125 multi-blob images contain both classes at once, and the 2:1 ratio holds in
-every month of the export, so this is two feature types on the part, not lighting or a date split.
-The large-radius class also runs higher on `BlobCircularity` (90–95 vs 85–89) and `Rectangularity`
-(≈80 vs ≈75).
+Blobs sit in one horizontal band (`BlobPositionY` ≈ 489–533 px) and come in **two shape classes**
+that are easy to mistake for a capture-condition difference but are not: of the 112 blobs,
+`InnerCircleRadius` is ≈4050–5600 (~40–56 px) on 53 of them and ≈1550–3900 (~15–39 px) on 59,
+while `BlobArea` stays ~900k–1M for both. Every image contains both classes at once, so this is
+two feature types on the part, not lighting or a date split. The large-radius class also runs
+higher on `BlobCircularity` and `Rectangularity`.
+
+> An earlier 493-row / 492-image version of this export was replaced on 2026-09-15. Figures quoted
+> anywhere against 492 images (blob-count distribution, Expected=1 → 48 flagged, etc.) describe
+> that older dump and no longer reproduce.
 
 ## Input data format
 
@@ -95,20 +103,44 @@ images. Y values cluster in 48000–54000 (480–540 px), a narrow horizontal ba
 
 ## Architecture
 
-- **`ff_blob_checker_gui.py`** — everything: parsing, the `App(tk.Tk)` window, and the file-moving
-  logic. All work happens in `App._run(execute: bool)`; both GUI buttons are thin wrappers
-  (`analyze_only` / `analyze_and_execute`) that only differ by that flag. When `execute=False`
-  nothing is moved, no log is written, and nothing else is emitted — "Analyze (no move/copy)"
-  is genuinely read-only.
-- **`ff_validate.py`** — standalone regression validator for the vision job, modeled on the Cognex
-  In-Sight "Job Validation" feature. Shares no code with the GUI (it re-implements `parse_csv`
-  correctly, without the bare `except`) and is deliberately import-free so it stays CI-runnable.
-  `baseline` captures an export's per-image blob results as expected values; `run` re-reads a later
-  export and reports E/A per field, exiting 1 on any drift. Three things it handles that the GUI
-  does not: blob slot order is canonicalized by `BlobPositionX` before comparing (slot order is not
-  guaranteed stable across runs), only slots `1..BlobNumResults` are read so the `0` padding never
-  enters a comparison, and images are joinable by `ImageName`, BMP content hash, or row index —
-  the hash mode exists because `Camera3_<epoch>.bmp` names change on every re-capture.
+- **`ff_blob_checker_gui.py`** — the `App(tk.Tk)` window, now a `ttk.Notebook` with two tabs.
+  - **Blob Checker** (tab 1) — the original app: parsing, the form, and the file-moving logic.
+    All work happens in `App._run(execute: bool)`; both buttons are thin wrappers
+    (`analyze_only` / `analyze_and_execute`) that only differ by that flag. When `execute=False`
+    nothing is moved, no log is written, and nothing else is emitted — "Analyze (no move/copy)"
+    is genuinely read-only. Every rough edge listed below still lives here, untouched.
+  - **Job Validation** (tab 2) — a front end over `ff_validate`, built by `_build_validation_tab`.
+    It reads CSVs through `ffv.read_records`, **never** this module's own `parse_csv`: the latter
+    returns raw wide rows including the `0` slot padding, does not canonicalize slot order, and
+    hands back the trailer row. A regression gate built on it would report false drift and could
+    silently skip rows. `_val_compute` deliberately contains no Tk calls, so it stays movable to
+    a worker thread; `_val_render` owns all the widget updates.
+  - The `guarded` decorator wraps every tab-2 handler, because Tk swallows callback exceptions
+    silently (that is exactly how the `median(None)` bug below hides). Internal helpers raise
+    plain `ValueError`; `guarded` turns them into a dialog at the boundary. Note it is applied
+    only to the new handlers — `Tk.report_callback_exception` is deliberately *not* overridden,
+    since that would change tab 1's observable behavior.
+- **`ff_validate.py`** — regression validator for the vision job, modeled on the Cognex In-Sight
+  "Job Validation" feature. Usable as a CLI and imported by the GUI's tab 2; the dependency is
+  one-directional — `ff_validate` imports nothing from the GUI and stays CI-runnable on its own.
+  `baseline` captures an export's per-image blob results as expected values; `run` re-reads a
+  later export and reports E/A, exiting 1 on any regression.
+  - **The verdict is `BlobNumResults`, compared exactly.** A blob is a feature that either
+    registers or does not, so 8 detections dropping to 7 is a regression while a blob whose area
+    moved 3% is not. `compare(..., metrics=False)` is the default; `--metrics` opts into
+    tolerance-checked per-blob comparison, and `--fields` / `--tolerance` only apply with it.
+    `DEFAULT_TOLERANCES` therefore does not affect a default run.
+  - `describe_mismatch()` is the drill-down: on a count mismatch the blobs cannot be paired 1:1,
+    so both sides are emitted positionally with `itertools.zip_longest`, and the short side pads
+    with `None`. That is what shows *which* feature went missing. Rendered by `--verbose` in the
+    CLI and as child rows in the GUI tree.
+  - It re-implements `parse_csv` rather than sharing the GUI's, deliberately: only slots
+    `1..BlobNumResults` are read so the `0` padding never enters a comparison, blob slot order is
+    canonicalized by `BlobPositionX` (slot order is not guaranteed stable across runs), the
+    trailer row is dropped by its empty `ImageName` rather than absorbed by a bare `except`, and
+    the file is opened `utf-8-sig` so the BOM goes away.
+  - Images join by `ImageName`, BMP content hash, or row index. The hash mode exists because
+    `Camera3_<epoch>.bmp` names change on every re-capture, which breaks a name join.
 - **`collect_failed.sh`** — post-hoc cleanup utility, independent of the Python code.
 
 ### The two-pass structure of `_run` (important)
@@ -155,10 +187,12 @@ unless that is the task:
   back (`blobAreas = self.parse_blob_area(...)`), permanently poisoning the accumulator: every
   later row raises `AttributeError` on `None.append` into the bare except, and the results box
   finally dies on `median(None)` with `TypeError: 'NoneType' object is not iterable`.
-  The sample export has 48 such rows, the first at index 55. Because Tkinter swallows callback
-  exceptions, the window stays up showing a report truncated after "Under-max count" with **no
-  error dialog** — it looks like it merely finished quietly. Crops and the under-max tally are
-  computed before this point and are unaffected.
+  Because Tkinter swallows callback exceptions, the window stays up showing a report truncated
+  after "Under-max count" with **no error dialog** — it looks like it merely finished quietly.
+  Crops and the under-max tally are computed before this point and are unaffected.
+  The current golden corpus has no zero-blob rows, so tab 1 completes normally on it and the bug
+  stays latent; the old 492-image export had 48 such rows (first at index 55) and reproduced it.
+  Tab 2 is immune — `ffv.read_records` handles a zero-blob row as simply an empty `blobs` list.
 - **The "passed" categorization collapses to `mixed` whenever Expected < 8.** It collects every
   `ModelNumber*` column whose value is a non-empty string, but unused slots hold `"0"`, so
   `all(l == "1")` fails on any row with fewer than 8 blobs. It works correctly at Expected=8,

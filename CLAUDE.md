@@ -46,8 +46,15 @@ Blob counts over its 492 named rows, useful as a regression fixture — set the 
 |---|---|---|---|---|---|---|---|
 | images | 48 | 134 | 115 | 178 | 4 | 1 | 12 |
 
-So Expected=1 → 48 flagged, Expected=3 → 297, Expected=8 → 480. Blobs are ~110 px circles
-(`InnerCircleRadius` ≈ 5500 → 55 px) sitting in one horizontal band, `BlobPositionY` ≈ 480–540 px.
+So Expected=1 → 48 flagged, Expected=3 → 297, Expected=8 → 480.
+
+Blobs sit in one horizontal band (`BlobPositionY` ≈ 480–540 px) and come in **two shape classes**
+that are easy to mistake for a capture-condition difference but are not: `InnerCircleRadius` is
+either ≈5500 (55 px, 288 images) or ≈1950–2200 (~20 px, 156 images), while `BlobArea` stays
+~900k–1M for both. 125 multi-blob images contain both classes at once, and the 2:1 ratio holds in
+every month of the export, so this is two feature types on the part, not lighting or a date split.
+The large-radius class also runs higher on `BlobCircularity` (90–95 vs 85–89) and `Rectangularity`
+(≈80 vs ≈75).
 
 ## Input data format
 
@@ -140,10 +147,14 @@ unless that is the task:
   exceptions, the window stays up showing a report truncated after "Under-max count" with **no
   error dialog** — it looks like it merely finished quietly. Crops and the under-max tally are
   computed before this point and are unaffected.
-- **The "passed" categorization always yields `mixed`.** It collects every `ModelNumber*` column
-  whose value is a non-empty string, but unused slots hold `"0"`, so `all(l == "1")` can never be
-  true on a row with fewer than 8 blobs. In the sample the only values present anywhere are `1`
-  (1016 slots) and `0` (2920 padding slots) — `2` never appears, so `2-bottom` is unreachable too.
+- **The "passed" categorization collapses to `mixed` whenever Expected < 8.** It collects every
+  `ModelNumber*` column whose value is a non-empty string, but unused slots hold `"0"`, so
+  `all(l == "1")` fails on any row with fewer than 8 blobs. It works correctly at Expected=8,
+  where a passing image fills all eight slots and no padding is read — verified: a run at
+  Expected=8 produced a `passed_<ts>/1-top/` holding exactly the 12 eight-blob images, all
+  `ModelNumber` = `1`. Below 8 the padding poisons the label set and every passing image is
+  filed as `mixed`. Separately, `2` never appears anywhere in the sample, so `2-bottom` is
+  unreachable on this dataset regardless.
 - Even on rows it survives, `parse_blob_area()` `return`s inside its `for` loop, so it records only
   the first blob per row — the median/min/max line describes first-blob areas, not all blobs.
 - The results pane prints "Log written to:" twice.

@@ -17,6 +17,9 @@ There is no test suite, no linter config, and no package manifest — the repo i
 pip install -r requirements.txt   # pyinstaller only; the app itself is pure stdlib + tkinter
 python ff_blob_checker_gui.py     # run the GUI
 
+python ff_validate.py baseline <csv> -o baseline.json   # capture expected results
+python ff_validate.py run <csv> -b baseline.json        # diff a later export against them
+
 ./collect_failed.sh               # bash only; consolidates failed_2025*/ BMPs into aggregate_failed/ and deletes them
 ```
 
@@ -97,6 +100,15 @@ images. Y values cluster in 48000–54000 (480–540 px), a narrow horizontal ba
   (`analyze_only` / `analyze_and_execute`) that only differ by that flag. When `execute=False`
   nothing is moved, no log is written, and nothing else is emitted — "Analyze (no move/copy)"
   is genuinely read-only.
+- **`ff_validate.py`** — standalone regression validator for the vision job, modeled on the Cognex
+  In-Sight "Job Validation" feature. Shares no code with the GUI (it re-implements `parse_csv`
+  correctly, without the bare `except`) and is deliberately import-free so it stays CI-runnable.
+  `baseline` captures an export's per-image blob results as expected values; `run` re-reads a later
+  export and reports E/A per field, exiting 1 on any drift. Three things it handles that the GUI
+  does not: blob slot order is canonicalized by `BlobPositionX` before comparing (slot order is not
+  guaranteed stable across runs), only slots `1..BlobNumResults` are read so the `0` padding never
+  enters a comparison, and images are joinable by `ImageName`, BMP content hash, or row index —
+  the hash mode exists because `Camera3_<epoch>.bmp` names change on every re-capture.
 - **`collect_failed.sh`** — post-hoc cleanup utility, independent of the Python code.
 
 ### The two-pass structure of `_run` (important)

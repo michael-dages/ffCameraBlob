@@ -115,6 +115,12 @@ images. Y values cluster in 48000–54000 (480–540 px), a narrow horizontal ba
     hands back the trailer row. A regression gate built on it would report false drift and could
     silently skip rows. `_val_compute` deliberately contains no Tk calls, so it stays movable to
     a worker thread; `_val_render` owns all the widget updates.
+    Rows are click-to-open: `_val_image_path()` walks up from any row (a `slot N` detail row
+    included) to the top-level image row and joins its name onto `self.val_images_dir`, which is
+    set by `_val_render` and `capture_baseline` from the run's options — *not* re-derived from
+    the CSV, so a custom images folder is honored. `<Double-1>` returns `"break"` on an image row
+    to suppress the tree's own expand-toggle, and returns `None` on detail rows so they behave
+    normally. `_open_path` uses `os.startfile` on Windows, which is what ships.
   - The `guarded` decorator wraps every tab-2 handler, because Tk swallows callback exceptions
     silently (that is exactly how the `median(None)` bug below hides). Internal helpers raise
     plain `ValueError`; `guarded` turns them into a dialog at the boundary. Note it is applied

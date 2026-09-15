@@ -3,6 +3,8 @@ import re
 import csv
 import json
 import shutil
+import subprocess
+import sys
 import time
 import functools
 import traceback
@@ -95,6 +97,7 @@ class App(tk.Tk):
         self.val_summary_var = tk.StringVar(value="No validation run yet.")
         self.val_tree = None      # ttk.Treeview, set in _build_validation_tab
         self.val_report = None    # last report dict, for Export Report…
+        self.val_images_dir = ""  # where the tree's rows resolve their BMPs
 
         # UI Layout
         self._build_ui()
@@ -251,7 +254,7 @@ class App(tk.Tk):
         tree_frame.grid(row=11, column=0, columnspan=3, sticky="nsew", **pad)
         self.val_tree = ttk.Treeview(tree_frame, columns=("status", "expected", "actual", "delta"),
                                      show="tree headings", selectmode="browse", height=16)
-        self.val_tree.heading("#0", text="Image / detail")
+        self.val_tree.heading("#0", text="Image / detail  (double-click to open)")
         self.val_tree.column("#0", width=250, minwidth=160, stretch=True)
         # Expected/Actual hold the drill-down blob descriptions
         # ("x=117541 y=50625 area=887700 r=2050"), so they need real width.
@@ -272,6 +275,16 @@ class App(tk.Tk):
         sb.grid(row=0, column=1, sticky="ns")
         tree_frame.rowconfigure(0, weight=1)
         tree_frame.columnconfigure(0, weight=1)
+
+        # Open the BMP behind a row. Double-click acts on image rows only;
+        # detail rows fall through so the tree keeps its normal behavior.
+        self.val_tree.bind("<Double-1>", self.on_tree_double_click)
+        self.val_menu = tk.Menu(self, tearoff=0)
+        self.val_menu.add_command(label="Open image", command=self.open_selected_image)
+        self.val_menu.add_command(label="Show in folder", command=self.reveal_selected_image)
+        self.val_menu.add_separator()
+        self.val_menu.add_command(label="Copy image path", command=self.copy_selected_image_path)
+        self.val_tree.bind("<Button-3>", self.on_tree_right_click)
 
         vf.rowconfigure(11, weight=1)
         vf.columnconfigure(1, weight=1)
@@ -418,6 +431,7 @@ class App(tk.Tk):
                 for r in rows if r["status"] == "FAIL"],
             "rows": rows,
             "baseline_images": len(expected),
+            "images_dir": opts["images_dir"],
         }
 
     @guarded
@@ -441,6 +455,7 @@ class App(tk.Tk):
     def _val_render(self, report):
         tree = self.val_tree
         tree.delete(*tree.get_children())
+        self.val_images_dir = report.get("images_dir", "")
 
         rows = report["rows"]
         order = {"FAIL": 0, "MISSING": 1, "UNEXPECTED": 2, "UNKEYED": 3, "PASS": 4}
@@ -527,6 +542,7 @@ class App(tk.Tk):
         self._val_load_baseline_header()
         self.val_report = None
         self.val_tree.delete(*self.val_tree.get_children())
+        self.val_images_dir = opts["images_dir"]
         for key, rec in mapping.items():
             self.val_tree.insert("", "end", text=rec["image"],
                                  values=("CAPTURED", ffv.fmt(rec[ffv.COUNT_FIELD]), "", ""),
@@ -554,6 +570,76 @@ class App(tk.Tk):
             json.dump(payload, f, indent=2)
             f.write("\n")
         messagebox.showinfo(APP_TITLE, "Report written to:\n%s" % out)
+
+    # --- opening the image behind a row --------------------------------
+
+    def _val_image_path(self, iid):
+        """Resolve a tree row to its BMP on disk.
+
+        Detail rows ("slot 3") carry no image of their own, so walk up to the
+        top-level row, whose text is the image name. Raises ValueError with
+        user-facing text when there is nothing to open.
+        """
+        if not iid:
+            raise ValueError("Select an image row first.")
+        while self.val_tree.parent(iid):
+            iid = self.val_tree.parent(iid)
+        name = self.val_tree.item(iid, "text").strip()
+        if not name:
+            raise ValueError("That row has no image associated with it.")
+        if not self.val_images_dir:
+            raise ValueError("No images folder is known yet — run a validation first.")
+        path = os.path.join(self.val_images_dir, name)
+        if not os.path.isfile(path):
+            raise ValueError("Image not found on disk:\n%s\n\nCheck the images folder "
+                             "setting — it is currently:\n%s" % (path, self.val_images_dir))
+        return path
+
+    def _open_path(self, path):
+        """Hand a path to the OS default handler."""
+        if hasattr(os, "startfile"):          # Windows, which is what ships
+            os.startfile(path)                # noqa: S606 - intended
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", path])
+        else:
+            subprocess.Popen(["xdg-open", path])
+
+    @guarded
+    def on_tree_double_click(self, event):
+        iid = self.val_tree.identify_row(event.y)
+        if not iid or self.val_tree.parent(iid):
+            return None                       # detail row: let the tree do its thing
+        self._open_path(self._val_image_path(iid))
+        return "break"                        # don't also toggle the row open
+
+    @guarded
+    def on_tree_right_click(self, event):
+        iid = self.val_tree.identify_row(event.y)
+        if not iid:
+            return
+        self.val_tree.selection_set(iid)
+        self.val_tree.focus(iid)
+        self.val_menu.tk_popup(event.x_root, event.y_root)
+
+    @guarded
+    def open_selected_image(self):
+        self._open_path(self._val_image_path(self.val_tree.focus()))
+
+    @guarded
+    def reveal_selected_image(self):
+        path = self._val_image_path(self.val_tree.focus())
+        if sys.platform == "win32":
+            # /select, needs a native path and must not be quoted by the shell
+            subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
+        else:
+            self._open_path(os.path.dirname(path))
+
+    @guarded
+    def copy_selected_image_path(self):
+        path = self._val_image_path(self.val_tree.focus())
+        self.clipboard_clear()
+        self.clipboard_append(path)
+        self.val_summary_var.set("Copied to clipboard: %s" % path)
 
     @guarded
     def val_expand_all(self):

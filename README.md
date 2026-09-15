@@ -54,6 +54,12 @@ actual count, and a delta; failing rows expand to show the expected blob slots
 against the actual ones, so you can see *which* feature stopped registering.
 **Capture Baseline…** writes a new baseline next to the CSV.
 
+**Double-click any row to open its `.bmp`** in your default image viewer —
+including a `slot N` detail row, which opens the image it belongs to. Right-click
+for **Open image**, **Show in folder**, and **Copy image path**. Images resolve
+against the images-folder setting, so if a picture won't open, check that first;
+the error names both the path it tried and the folder it used.
+
 ### CLI
 
 ```bash

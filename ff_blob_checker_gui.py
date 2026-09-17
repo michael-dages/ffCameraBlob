@@ -718,8 +718,8 @@ class App(tk.Tk):
                 self.minArea = area
             if area > self.maxArea:
                 self.maxArea = area
-            return areas
-        
+        return areas
+
     def _run(self, execute=False):
         self.text.delete("1.0", tk.END)
 
@@ -854,7 +854,10 @@ class App(tk.Tk):
         # UI
         self.text.insert(tk.END, f"CSV: {csv_path}\nTotal rows: {total_rows}\nExpected max: {expected_max}\n")
         self.text.insert(tk.END, f"Under-max count: {len(under_max)}\n")
-        self.text.insert(tk.END, f"Median blob size: " + str(median(blobAreas)) + " Min blob size: " + str(min(blobAreas)) + " Max blob size: " + str(max(blobAreas))+"\n\n")
+        if blobAreas:
+            self.text.insert(tk.END, f"Median blob size: " + str(median(blobAreas)) + " Min blob size: " + str(min(blobAreas)) + " Max blob size: " + str(max(blobAreas))+"\n\n")
+        else:
+            self.text.insert(tk.END, "Blob size stats: no blob areas found.\n\n")
         
         self.text.insert(tk.END, f"Log written to: {log_path}\n")
         if self.save_passed_var.get():

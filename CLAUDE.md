@@ -43,29 +43,43 @@ with its `Camera3_<epoch>.bmp` images in the parent `cam3\` folder — i.e. the 
 below the images" layout the GUI defaults assume. Images are 1280×1024 8-bit grayscale
 (`mode="L"`). Use it to check parsing changes against reality.
 
-**This is a curated golden corpus, not a raw production dump.** As of 2026-09-15 it holds 15 data
-rows: 14 named images plus the trailer, and **every image has `BlobNumResults` = 8**. That makes
-it the validation fixture — any image that comes back with a count other than 8 is a regression.
+**This is a curated golden corpus, not a raw production dump.** As of 2026-09-17 it holds 54 data
+rows: 53 named images (all distinct, each with its `.bmp` present in `cam3\`) plus the trailer.
+**52 images have `BlobNumResults` = 8 and one has 7** (`Camera3_-171122316.bmp`) — that single
+short image is the fixture's built-in failure case, not a defect in the corpus. There are **no
+zero-blob rows**, which is why tab 1's `parse_blob_area()` edge stayed latent here.
 `BlobNumSearchMax` is `8` throughout (still a config input, not an expected yield).
 
-Two image names carry **negative epochs** (`Camera3_-1546426502.bmp`, `Camera3_-1546454221.bmp`),
-which parse and validate fine but mean the camera clock was unset or overflowed at capture. Don't
-assume sorting these filenames yields chronological order.
+**41 of the 53 image names carry negative epochs** (e.g. `Camera3_-171122316.bmp`,
+`Camera3_-1546426502.bmp`), which parse and validate fine but mean the camera clock was unset or
+overflowed at capture. Don't assume sorting these filenames yields chronological order.
 
-Because every count is 8, a tab-1 run at Expected=8 flags nothing and files all 14 images into
-`passed_<ts>/1-top/`; that is also the only Expected value at which the "passed" categorization
-works (see the rough edges below). Expected=9 flags all 14.
+A tab-1 run at Expected=8 flags exactly the one 7-blob image and files the other 52 into
+`passed_<ts>/1-top/`; Expected=8 is also the only value at which the "passed" categorization
+works (see the rough edges below). Expected=9 flags all 53.
 
-Blobs sit in one horizontal band (`BlobPositionY` ≈ 489–533 px) and come in **two shape classes**
-that are easy to mistake for a capture-condition difference but are not: of the 112 blobs,
-`InnerCircleRadius` is ≈4050–5600 (~40–56 px) on 53 of them and ≈1550–3900 (~15–39 px) on 59,
-while `BlobArea` stays ~900k–1M for both. Every image contains both classes at once, so this is
+Blobs sit in one horizontal band (`BlobPositionY` ≈ 488–533 px) and come in **two shape classes**
+that are easy to mistake for a capture-condition difference but are not: of the 423 blobs,
+`InnerCircleRadius` is ≈4050–5600 (~40–56 px) on 216 of them and ≈1550–3900 (~15–39 px) on 207,
+while `BlobArea` stays ~876k–1.05M for both. Every image contains both classes at once, so this is
 two feature types on the part, not lighting or a date split. The large-radius class also runs
 higher on `BlobCircularity` and `Rectangularity`.
 
-> An earlier 493-row / 492-image version of this export was replaced on 2026-09-15. Figures quoted
-> anywhere against 492 images (blob-count distribution, Expected=1 → 48 flagged, etc.) describe
-> that older dump and no longer reproduce.
+`Anisometry` is **constant at `10` across all 423 blobs** and carries no information here. The
+value looks like elongation × 10 with the decimals dropped: derived from `BlobLength`/`BlobWidth`
+the true ratio spans 1.000–1.094, which truncates to `10` for every blob (rounding would give
+`11` for 7 of them). So the column cannot detect shape drift below ~10%, and `ff_validate`'s
+`abs: 2` tolerance for it allows ~20%. Prefer `BlobCircularity` (16 distinct values, 63–97) or
+the side ratio for shape checks. Note `BlobLength` is never greater than `BlobWidth` in this
+export, so "length" is not the long axis.
+
+Every filled `ModelNumber` slot is `1` (all 423), so `2-bottom` is unreachable on this dataset.
+
+> This export has been replaced twice. A 493-row / 492-image version gave way to a 15-row /
+> 14-image one on 2026-09-15, which in turn became the current 54-row / 53-image corpus by
+> 2026-09-17. Figures quoted anywhere against 492 images (blob-count distribution, Expected=1 →
+> 48 flagged, etc.) or against 14 images all at 8 blobs describe those older dumps and no longer
+> reproduce. Re-count before trusting any number here.
 
 ## Input data format
 
@@ -87,7 +101,7 @@ input must respect:
    ceiling the vision app was told to search up to (`8` throughout the sample), *not* the number
    of features a good part should have. Do not treat it as an expected yield.
 
-**One row per image.** In the sample all 493 rows have distinct `ImageName`s; blob multiplicity is
+**One row per image.** In the sample all 53 image rows have distinct `ImageName`s; blob multiplicity is
 expressed across the `01`–`08` slots, never across rows. The group-by-`ImageName` pass therefore
 operates on groups of size 1 in practice, though it is written to tolerate more.
 
@@ -164,7 +178,8 @@ images. Y values cluster in 48000–54000 (480–540 px), a narrow horizontal ba
 The threshold is the GUI's "Expected BlobNumResults (max)" field, and nothing overrides it. Until
 recently pass 1 reassigned `expected_max` from each row's `BlobNumSearchMax` (added in `3d96d5b`),
 which silently discarded whatever the user typed and compared results against a config ceiling
-instead of an expected yield — on the sample that flagged 480 of 492 images. That line is gone; if
+instead of an expected yield — on the then-current 492-image export that flagged 480 of them. That
+line is gone; if
 you reintroduce CSV-driven thresholds, use a column from the `VA OUTPUTS` side.
 
 ### Path conventions
@@ -187,26 +202,25 @@ Defaults are derived from the selected CSV's location and are the behavior users
 Confirmed against the sample export. Worth knowing before editing; do not "fix" them incidentally
 unless that is the task:
 
-- **The blob-area stats are dead on any export containing a zero-blob row, and take the tail of
-  the report with them.** `parse_blob_area()` only `return`s from *inside* its `for` loop, so a row
-  with `BlobNumResults == 0` falls off the end and returns `None`. `_run` assigns that straight
-  back (`blobAreas = self.parse_blob_area(...)`), permanently poisoning the accumulator: every
-  later row raises `AttributeError` on `None.append` into the bare except, and the results box
-  finally dies on `median(None)` with `TypeError: 'NoneType' object is not iterable`.
-  Because Tkinter swallows callback exceptions, the window stays up showing a report truncated
-  after "Under-max count" with **no error dialog** — it looks like it merely finished quietly.
-  Crops and the under-max tally are computed before this point and are unaffected.
-  The current golden corpus has no zero-blob rows, so tab 1 completes normally on it and the bug
-  stays latent; the old 492-image export had 48 such rows (first at index 55) and reproduced it.
-  Tab 2 is immune — `ffv.read_records` handles a zero-blob row as simply an empty `blobs` list.
 - **The "passed" categorization collapses to `mixed` whenever Expected < 8.** It collects every
   `ModelNumber*` column whose value is a non-empty string, but unused slots hold `"0"`, so
   `all(l == "1")` fails on any row with fewer than 8 blobs. It works correctly at Expected=8,
   where a passing image fills all eight slots and no padding is read — verified: a run at
-  Expected=8 produced a `passed_<ts>/1-top/` holding exactly the 12 eight-blob images, all
-  `ModelNumber` = `1`. Below 8 the padding poisons the label set and every passing image is
-  filed as `mixed`. Separately, `2` never appears anywhere in the sample, so `2-bottom` is
-  unreachable on this dataset regardless.
-- Even on rows it survives, `parse_blob_area()` `return`s inside its `for` loop, so it records only
-  the first blob per row — the median/min/max line describes first-blob areas, not all blobs.
+  Expected=8 files the 52 eight-blob images into `passed_<ts>/1-top/`, all `ModelNumber` = `1`.
+  Below 8 the padding poisons the label set and every passing image is filed as `mixed`.
+  Separately, `2` never appears anywhere in the sample, so `2-bottom` is unreachable on this
+  dataset regardless.
+- `self.minArea` / `self.maxArea` are dead: both start at `0`, `minArea` can therefore never
+  update (areas are positive), and the report line uses `min()`/`max()` over the list instead.
 - The results pane prints "Log written to:" twice.
+
+**Fixed 2026-09-17, before v1.0.0** (kept here as history — don't reintroduce): `parse_blob_area()`
+used to `return` from *inside* its `for` loop. A row with `BlobNumResults == 0` fell off the end
+and returned `None`, which `_run` assigned straight back into `blobAreas`, permanently poisoning
+the accumulator — later rows raised `AttributeError` on `None.append` into the bare except, and
+the report died on `median(None)`, leaving the window up with output truncated after "Under-max
+count" and **no error dialog**. Dedenting that `return` fixed it and also made the median/min/max
+line cover every blob rather than only the first per row (on the 53-image corpus: median
+977,000 over 423 blobs, versus 999,300 over 53 first-blobs before). The stats line is now also
+guarded against an empty `blobAreas`. Tab 2 was never affected — `ffv.read_records` treats a
+zero-blob row as an empty `blobs` list.

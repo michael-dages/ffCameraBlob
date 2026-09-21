@@ -86,6 +86,12 @@ class App(tk.Tk):
         self.minArea = 0
         self.maxArea = 0
 
+        # Blob Checker results pane: clickable image names. Maps a per-line
+        # Text tag to the BMP it should open; rebuilt on every run.
+        self.blob_link_paths = {}
+        self.blob_link_seq = 0
+        self.blob_menu_path = ""
+
         # Job Validation tab. Declared before _build_ui because that tab's
         # widgets bind these at construction time.
         self.val_csv_var = tk.StringVar()
@@ -162,9 +168,27 @@ class App(tk.Tk):
         ttk.Button(actions2, text="Analyze & Execute", command=self.analyze_and_execute).pack(side="left", padx=6)
 
         # Results
-        ttk.Label(frm, text="Results:").grid(row=16, column=0, sticky="w", **pad)
+        ttk.Label(frm, text="Results:  (double-click an image name to open it)").grid(
+            row=16, column=0, columnspan=3, sticky="w", **pad)
         self.text = tk.Text(frm, height=16, wrap="word")
         self.text.grid(row=17, column=0, columnspan=3, sticky="nsew", **pad)
+
+        # Image names in the under-max listing carry the "imglink" tag plus a
+        # per-line tag that keys self.blob_link_paths. Tag bindings fire before
+        # the Text widget's own, so returning "break" suppresses the default
+        # double-click word selection.
+        self.text.tag_configure("imglink", foreground="#0a58ca", underline=True)
+        self.text.tag_bind("imglink", "<Double-1>", self.on_result_double_click)
+        self.text.tag_bind("imglink", "<Button-3>", self.on_result_right_click)
+        self.text.tag_bind("imglink", "<Enter>",
+                           lambda e: self.text.configure(cursor="hand2"))
+        self.text.tag_bind("imglink", "<Leave>",
+                           lambda e: self.text.configure(cursor=""))
+        self.blob_menu = tk.Menu(self, tearoff=0)
+        self.blob_menu.add_command(label="Open image", command=self.open_result_image)
+        self.blob_menu.add_command(label="Show in folder", command=self.reveal_result_image)
+        self.blob_menu.add_separator()
+        self.blob_menu.add_command(label="Copy image path", command=self.copy_result_image_path)
 
         frm.rowconfigure(17, weight=1)
         frm.columnconfigure(1, weight=1)
@@ -596,7 +620,7 @@ class App(tk.Tk):
         return path
 
     def _open_path(self, path):
-        """Hand a path to the OS default handler."""
+        """Hand a path to the OS default handler. Shared by both tabs."""
         if hasattr(os, "startfile"):          # Windows, which is what ships
             os.startfile(path)                # noqa: S606 - intended
         elif sys.platform == "darwin":
@@ -625,14 +649,17 @@ class App(tk.Tk):
     def open_selected_image(self):
         self._open_path(self._val_image_path(self.val_tree.focus()))
 
-    @guarded
-    def reveal_selected_image(self):
-        path = self._val_image_path(self.val_tree.focus())
+    def _reveal_path(self, path):
+        """Show a file in the OS file manager. Shared by both tabs."""
         if sys.platform == "win32":
             # /select, needs a native path and must not be quoted by the shell
             subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
         else:
             self._open_path(os.path.dirname(path))
+
+    @guarded
+    def reveal_selected_image(self):
+        self._reveal_path(self._val_image_path(self.val_tree.focus()))
 
     @guarded
     def copy_selected_image_path(self):
@@ -720,8 +747,64 @@ class App(tk.Tk):
                 self.maxArea = area
         return areas
 
+    # --- opening the image behind a results line -----------------------
+    #
+    # The tab-2 tree resolves a row to a BMP on demand, against
+    # self.val_images_dir. Tab 1 cannot do that: with "move" selected the
+    # image no longer sits in the source folder by the time the listing is
+    # printed. So the path is recorded per image as the run handles it, and
+    # the line only carries the tag that looks it up.
+
+    def _blob_insert_link(self, name, path):
+        """Write an image name into the results pane as a clickable link."""
+        self.blob_link_seq += 1
+        tag = "imglink-%d" % self.blob_link_seq
+        self.blob_link_paths[tag] = path
+        self.text.insert(tk.END, name, ("imglink", tag))
+
+    def _blob_link_path(self, event):
+        """Resolve the click position to the BMP on that line.
+
+        Raises ValueError with user-facing text when there is nothing to open.
+        """
+        index = "@%d,%d" % (event.x, event.y)
+        for tag in self.text.tag_names(index):
+            path = self.blob_link_paths.get(tag)
+            if path:
+                if not os.path.isfile(path):
+                    raise ValueError("Image not found on disk:\n\n%s\n\nIt may have been "
+                                     "moved or deleted since this run." % path)
+                return path
+        raise ValueError("That line has no image associated with it.")
+
+    @guarded
+    def on_result_double_click(self, event):
+        self._open_path(self._blob_link_path(event))
+        return "break"                        # don't also select the word
+
+    @guarded
+    def on_result_right_click(self, event):
+        self.blob_menu_path = self._blob_link_path(event)
+        self.blob_menu.tk_popup(event.x_root, event.y_root)
+        return "break"
+
+    @guarded
+    def open_result_image(self):
+        self._open_path(self.blob_menu_path)
+
+    @guarded
+    def reveal_result_image(self):
+        self._reveal_path(self.blob_menu_path)
+
+    @guarded
+    def copy_result_image_path(self):
+        self.clipboard_clear()
+        self.clipboard_append(self.blob_menu_path)
+
     def _run(self, execute=False):
         self.text.delete("1.0", tk.END)
+        self.blob_link_paths.clear()
+        self.blob_menu_path = ""
 
         try:
             csv_path, img_src_dir, failed_dir = self._resolve_dirs()
@@ -796,11 +879,16 @@ class App(tk.Tk):
         if execute:
             os.makedirs(failed_dir, exist_ok=True)
 
+        # img_name -> the BMP the results pane should open for it. Starts at
+        # the source copy and follows the file when it is moved.
+        image_paths = {}
+
         def handle_failed(file_list):
             nonlocal moved_count, missing_count
             results = []
             for img_name, val, model in file_list:
                 action, note = "", ""
+                image_paths[img_name] = os.path.join(img_src_dir, img_name)
                 if execute:
                     sub = os.path.join(failed_dir, model, f"failed_{ts}") if self.sep_model_var.get() else os.path.join(failed_dir, f"failed_{ts}")
                     os.makedirs(sub, exist_ok=True)
@@ -809,6 +897,7 @@ class App(tk.Tk):
                         try:
                             if action_desc == "move":
                                 shutil.move(src, dst); action = "moved"
+                                image_paths[img_name] = dst
                             else:
                                 shutil.copy2(src, dst); action = "copied"
                             moved_count += 1
@@ -870,9 +959,11 @@ class App(tk.Tk):
             self.text.insert(tk.END, f"Action: {action_desc}\nProcessed: {moved_count}, Missing: {missing_count}\n")
 
         if under_max:
-            self.text.insert(tk.END, "\nUnder-max examples:\n")
+            self.text.insert(tk.END, "\nUnder-max examples (double-click a name to open):\n")
             for img_name, val, _ in under_max[:200]:
-                self.text.insert(tk.END, f"  {img_name} -> {val}\n")
+                self.text.insert(tk.END, "  ")
+                self._blob_insert_link(img_name, image_paths.get(img_name, ""))
+                self.text.insert(tk.END, f" -> {val}\n")
 
         messagebox.showinfo(APP_TITLE, f"Done. Under-max: {len(under_max)}, Passed: {len(passed)}")
 
